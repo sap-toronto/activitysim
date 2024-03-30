@@ -185,59 +185,58 @@ def identify_auto_overallocation(persons, households, tours):
     """
     # Tag auto sufficiency
     households['auto_sufficiency'] = 'suff'
-    households.loc[
-        (households['auto_ownership'] < households['num_drivers']) &
-        (households['auto_ownership'] > 0), 'auto_sufficiency'] = 'insuff'
-    households.loc[(households['auto_ownership'] == 0), 'auto_sufficiency'] = 'nocar'
+    households.loc[households.auto_ownership.between(0, households.num_drivers, 'neither'), 'auto_sufficiency'] = 'insuff'
+    households.loc[households.auto_ownership == 0, 'auto_sufficiency'] = 'nocar'
 
     # Isolate for SOV-based tours by driving aged persons in auto insufficient households.
     # This includes fully joint tours where the model only outputs them under a "point person".
     # We're treating the "point person" as the driver
-    households_insuff = households[households['auto_sufficiency'] == 'insuff']
-    person_drivers = persons[persons['is_driving_age']]
+    households_insuff = households[households.auto_sufficiency == 'insuff']
+    person_drivers = persons[persons.is_driving_age]
     # TODO: Expand criteria to cover joint tours once a reallocation method can be developed for it
-    tours_insuff = tours[
-        tours['household_id'].isin(households_insuff.index) &
-        tours['person_id'].isin(person_drivers.index) &
-        (tours['tour_mode'] == 'DRIVEALONEFREE')]
+    tours_sov_insuff = tours[
+        tours.household_id.isin(households_insuff.index) &
+        tours.person_id.isin(person_drivers.index) &
+        (tours.tour_mode == 'DRIVEALONEFREE')]
 
-    # Isolate for auto insufficient households with driver who made SOV-based tours
-    hh_insuff_sov_pers_count = tours_insuff[['household_id', 'person_id']].drop_duplicates().groupby('household_id')[
-        'person_id'].count()
+    # Isolate for per household count of driver who made SOV-based tours in auto insufficient households
+    unique_pers_sov_insuff = tours_sov_insuff[['household_id', 'person_id']].drop_duplicates()
+
+    count_pers_sov_insuff = unique_pers_sov_insuff.groupby('household_id').person_id.count()
+    count_pers_sov_insuff = count_pers_sov_insuff[count_pers_sov_insuff > 1]
+
     # Isolate for tours from auto insufficient households with multiple drivers who made SOV-based tours
-    tours_insuff_mult_sov = tours_insuff[
-        tours_insuff['household_id'].isin(hh_insuff_sov_pers_count[hh_insuff_sov_pers_count > 1].index)]
+    tours_insuff_mult_sov = tours_sov_insuff[tours_sov_insuff.household_id.isin(count_pers_sov_insuff.index)]
     tours_insuff_mult_sov = tours_insuff_mult_sov.sort_values(['household_id', 'start', 'end'])
-
     # shift household id for household check
-    tours_insuff_mult_sov['hh_id_shift'] = tours_insuff_mult_sov['household_id'].shift(1)
+    tours_insuff_mult_sov['hh_id_shift'] = tours_insuff_mult_sov.household_id.shift(1)
     # shift end time for overlap calculation
-    tours_insuff_mult_sov['end_shift'] = tours_insuff_mult_sov['end'].shift(1)
+    tours_insuff_mult_sov['end_shift'] = tours_insuff_mult_sov.end.shift(1)
     # flag same household
-    tours_insuff_mult_sov['hh_check'] = tours_insuff_mult_sov['household_id'] == tours_insuff_mult_sov['hh_id_shift']
-
-    # calculate overlap conditioned by the household flag
-    tours_insuff_mult_sov['overlap'] = ((tours_insuff_mult_sov['end_shift'] - tours_insuff_mult_sov['start']) *
-                                        tours_insuff_mult_sov['hh_check'] > 0)
+    tours_insuff_mult_sov['hh_check'] = tours_insuff_mult_sov.household_id == tours_insuff_mult_sov.hh_id_shift
+    # flag overlap based on tours time gap but conditional on the same household flag being true
+    tours_insuff_mult_sov['tours_time_gap'] = tours_insuff_mult_sov.start - tours_insuff_mult_sov.end_shift
+    tours_insuff_mult_sov['overlap'] = tours_insuff_mult_sov.tours_time_gap * tours_insuff_mult_sov.hh_check < 0
     # Also tag the corresponding overlapping tour before
-    tours_insuff_mult_sov['overlap'] = tours_insuff_mult_sov['overlap'] + tours_insuff_mult_sov['overlap'].shift(-1, fill_value=0)
+    tours_insuff_mult_sov['overlap'] = tours_insuff_mult_sov.overlap + tours_insuff_mult_sov.overlap.shift(-1,
+                                                                                                           fill_value=0)
 
     # Isolate for only overlapping tours
-    overlapped_tours = tours_insuff_mult_sov.loc[tours_insuff_mult_sov['overlap'] > 0].copy()
+    tours_overlapped = tours_insuff_mult_sov[tours_insuff_mult_sov.overlap > 0].copy()
 
-    assert (overlapped_tours.tour_mode == 'DRIVEALONEFREE').all()
-    assert overlapped_tours.groupby('household_id').size().min() > 1
+    assert (tours_overlapped.tour_mode == 'DRIVEALONEFREE').all()
+    assert tours_overlapped.groupby('household_id').size().min() > 1
 
-    return overlapped_tours
+    return tours_overlapped
 
 
-def household_auto_reallocation(households, tours_insuff_mult_sov_overlap, no_auto_tours):
+def household_auto_reallocation(households, tours_overlapped, no_auto_tours):
     """
 
     Parameters
     ----------
     households
-    tours_insuff_mult_sov_overlap
+    tours_overlapped
     no_auto_tours
 
     Returns
@@ -245,46 +244,43 @@ def household_auto_reallocation(households, tours_insuff_mult_sov_overlap, no_au
 
     """
     # Join in the non-auto utility/logsum and alternative mode choice from no-auto run
-    tours_insuff_mult_sov_overlap['no_auto_mc_logsum'] = no_auto_tours['mode_choice_logsum']
-    tours_insuff_mult_sov_overlap['no_auto_tour_mode'] = no_auto_tours['tour_mode']
+    tours_overlapped['no_auto_mc_logsum'] = no_auto_tours.mode_choice_logsum
+    tours_overlapped['no_auto_tour_mode'] = no_auto_tours.tour_mode
     # Calculate loss of utility from losing auto use
-    tours_insuff_mult_sov_overlap['no_auto_mc_logsum_loss'] = (tours_insuff_mult_sov_overlap['mode_choice_logsum'] -
-                                                               tours_insuff_mult_sov_overlap['no_auto_mc_logsum'])
+    tours_overlapped['no_auto_logsum_loss'] = tours_overlapped.mode_choice_logsum - tours_overlapped.no_auto_mc_logsum
 
     # Join in household vehicle numbers
-    tours_insuff_mult_sov_overlap = tours_insuff_mult_sov_overlap.merge(households[['auto_ownership']],
-                                                                        how='left',
-                                                                        left_on='household_id',
-                                                                        right_index=True)
+    tours_overlapped = tours_overlapped.merge(households[['auto_ownership']],
+                                              how='left',
+                                              left_on='household_id',
+                                              right_index=True)
 
     # Find the optimal allocation by sorting based on loss of tour mode choice utility and prioritizing tours where the
     # difference is the greatest.
     # The method is a little crude and inefficient in its allocation, but it works
-    tours_insuff_mult_sov_overlap['reallocation_flag'] = 0
+    tours_overlapped['reallocation_flag'] = 0
     reallocated_groups = []
-    for name, group in tours_insuff_mult_sov_overlap.groupby('household_id'):
+    for name, group in tours_overlapped.groupby('household_id'):
         # Sort by utility loss in descending order
-        group.sort_values(by='no_auto_mc_logsum_loss', ascending=False, inplace=True)
-        # flag bottom tours for reallocation
-        group.iloc[int(group['auto_ownership'].max()):, -1] = 1
+        group.sort_values(by='no_auto_logsum_loss', ascending=False, inplace=True)
+        # flag bottom tours that exceeds number of vehicles in household for reallocation
+        num_of_veh = int(group['auto_ownership'].max())
+        group.iloc[num_of_veh:, -1] = 1
         reallocated_groups.append(group)
-    tours_insuff_mult_sov_realloc = pd.concat(reallocated_groups)
+    tours_realloc = pd.concat(reallocated_groups)
 
     # Allocate new alternative mode - Could definitely be done more elegently
-    tours_insuff_mult_sov_realloc.loc[tours_insuff_mult_sov_realloc['reallocation_flag'] > 0, 'tour_mode'] = \
-        tours_insuff_mult_sov_realloc['no_auto_tour_mode']
-    tours_insuff_mult_sov_realloc.loc[tours_insuff_mult_sov_realloc['reallocation_flag'] > 0, 'mode_choice_logsum'] = \
-        tours_insuff_mult_sov_realloc['no_auto_mc_logsum']
+    tours_realloc.loc[tours_realloc.reallocation_flag > 0, 'tour_mode'] = tours_realloc.no_auto_tour_mode
+    tours_realloc.loc[tours_realloc.reallocation_flag > 0, 'mode_choice_logsum'] = tours_realloc.no_auto_mc_logsum
 
-    assert (tours_insuff_mult_sov_realloc.loc[
-                tours_insuff_mult_sov_realloc['reallocation_flag'] == 1, 'tour_mode'] != 'DRIVEALONEFREE').all()
+    assert (tours_realloc.loc[tours_realloc['reallocation_flag'] == 1, 'tour_mode'] != 'DRIVEALONEFREE').all()
 
-    return tours_insuff_mult_sov_realloc[no_auto_tours.columns]
+    return tours_realloc[no_auto_tours.columns]
 
 
 @inject.step()
 def tour_mode_choice_reallocation_simulate(
-    households, persons, tours, persons_merged, network_los, chunk_size, trace_hh_id
+        households, persons, tours, persons_merged, network_los, chunk_size, trace_hh_id
 ):
     """
     Tour mode choice auto reallocation simulate
@@ -422,7 +418,7 @@ def tour_mode_choice_reallocation_simulate(
     #
     choices_list = []
     for tour_purpose, tours_segment in primary_tours_merged.groupby(
-        segment_column_name
+            segment_column_name
     ):
 
         logger.info(
@@ -473,7 +469,7 @@ def tour_mode_choice_reallocation_simulate(
             for mode, path_types in tvpb_mode_path_types.items():
 
                 for direction, skim in zip(
-                    ["od", "do"], [tvpb_logsum_odt, tvpb_logsum_dot]
+                        ["od", "do"], [tvpb_logsum_odt, tvpb_logsum_dot]
                 ):
 
                     path_type = path_types[direction]
@@ -513,13 +509,16 @@ def tour_mode_choice_reallocation_simulate(
     assign_in_place(primary_tours, choices_df)
 
     # update tours table with mode choice (and optionally logsums)
-    tours_no_auto = tours.to_frame()
+    no_auto_tours = tours.to_frame()
     all_tours = tours.to_frame()
-    assign_in_place(tours_no_auto, choices_df)
+    assign_in_place(no_auto_tours, choices_df)
+
+    all_tours['old_tour_mode'] = all_tours.tour_mode
+    all_tours['old_mode_choice_logsum'] = all_tours.mode_choice_logsum
 
     overlapped_tours = identify_auto_overallocation(persons, households, all_tours)
 
-    reallocated_tours = household_auto_reallocation(households, overlapped_tours, tours_no_auto)
+    reallocated_tours = household_auto_reallocation(households, overlapped_tours, no_auto_tours)
 
     assign_in_place(all_tours, reallocated_tours)
 
