@@ -185,7 +185,8 @@ def identify_auto_overallocation(persons, households, tours):
     """
     # Tag auto sufficiency
     households['auto_sufficiency'] = 'suff'
-    households.loc[households.auto_ownership.between(0, households.num_drivers, 'neither'), 'auto_sufficiency'] = 'insuff'
+    households.loc[
+        households.auto_ownership.between(0, households.num_drivers, 'neither'), 'auto_sufficiency'] = 'insuff'
     households.loc[households.auto_ownership == 0, 'auto_sufficiency'] = 'nocar'
 
     # Isolate for SOV-based tours by driving aged persons in auto insufficient households.
@@ -204,6 +205,12 @@ def identify_auto_overallocation(persons, households, tours):
 
     count_pers_sov_insuff = unique_pers_sov_insuff.groupby('household_id').person_id.count()
     count_pers_sov_insuff = count_pers_sov_insuff[count_pers_sov_insuff > 1]
+    count_pers_sov_insuff = pd.merge(count_pers_sov_insuff,
+                                     households[['auto_ownership']],
+                                     how='left',
+                                     left_on='household_id',
+                                     right_index=True)
+    count_pers_sov_insuff = count_pers_sov_insuff[count_pers_sov_insuff.auto_ownership < count_pers_sov_insuff.person_id]
 
     # Isolate for tours from auto insufficient households with multiple drivers who made SOV-based tours
     tours_insuff_mult_sov = tours_sov_insuff[tours_sov_insuff.household_id.isin(count_pers_sov_insuff.index)]
