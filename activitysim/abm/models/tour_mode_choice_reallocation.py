@@ -210,7 +210,8 @@ def identify_auto_overallocation(persons, households, tours):
                                      how='left',
                                      left_on='household_id',
                                      right_index=True)
-    count_pers_sov_insuff = count_pers_sov_insuff[count_pers_sov_insuff.auto_ownership < count_pers_sov_insuff.person_id]
+    count_pers_sov_insuff = count_pers_sov_insuff[
+        count_pers_sov_insuff.auto_ownership < count_pers_sov_insuff.person_id]
 
     # Isolate for tours from auto insufficient households with multiple drivers who made SOV-based tours
     tours_insuff_mult_sov = tours_sov_insuff[tours_sov_insuff.household_id.isin(count_pers_sov_insuff.index)]
@@ -297,8 +298,14 @@ def tour_mode_choice_reallocation_simulate(
     model_settings = config.read_model_settings(model_settings_file_name)
 
     logsum_column_name = model_settings.get("MODE_CHOICE_LOGSUM_COLUMN_NAME")
+    old_tour_mode_column_name = model_settings.get("OLD_TOUR_MODE_COLUMN_NAME")
+    old_logsum_column_name = model_settings.get("OLD_MODE_CHOICE_LOGSUM_COLUMN_NAME")
     mode_column_name = "tour_mode"
     segment_column_name = "tour_purpose"
+
+    if logsum_column_name is None:
+        raise Exception('tour mode choice logsum column needed for tour auto mode reallocation. '
+                        'Define column in tour_mode_choice_reallocation.yaml')
 
     households = households.to_frame()
     persons = persons.to_frame()
@@ -520,8 +527,15 @@ def tour_mode_choice_reallocation_simulate(
     all_tours = tours.to_frame()
     assign_in_place(no_auto_tours, choices_df)
 
-    all_tours['old_tour_mode'] = all_tours.tour_mode
-    all_tours['old_mode_choice_logsum'] = all_tours.mode_choice_logsum
+    if old_tour_mode_column_name is not None:
+        all_tours[old_tour_mode_column_name] = all_tours.tour_mode
+
+    if old_logsum_column_name is not None:
+        if 'mode_choice_logsum' in all_tours.columns:
+            all_tours[old_logsum_column_name] = all_tours.mode_choice_logsum
+        else:
+            raise Exception('tour mode choice logsum column needed from tour mode choice model. '
+                            'Define column in tour_mode_choice.yaml')
 
     overlapped_tours = identify_auto_overallocation(persons, households, all_tours)
 
