@@ -293,6 +293,12 @@ def tour_mode_choice_reallocation_simulate(
     """
     Tour mode choice auto reallocation simulate
     """
+    tour_mode_choice_settings = config.read_model_settings('tour_mode_choice.yaml')
+
+    if tour_mode_choice_settings.get("MODE_CHOICE_LOGSUM_COLUMN_NAME") is None:
+        raise Exception('tour mode choice logsum column required from tour mode choice model. '
+                        'Define column in tour_mode_choice.yaml')
+
     trace_label = "tour_mode_choice_reallocation"
     model_settings_file_name = "tour_mode_choice_reallocation.yaml"
     model_settings = config.read_model_settings(model_settings_file_name)
@@ -531,11 +537,7 @@ def tour_mode_choice_reallocation_simulate(
         all_tours[old_tour_mode_column_name] = all_tours.tour_mode
 
     if old_logsum_column_name is not None:
-        if 'mode_choice_logsum' in all_tours.columns:
-            all_tours[old_logsum_column_name] = all_tours.mode_choice_logsum
-        else:
-            raise Exception('tour mode choice logsum column needed from tour mode choice model. '
-                            'Define column in tour_mode_choice.yaml')
+        all_tours[old_logsum_column_name] = all_tours.mode_choice_logsum
 
     overlapped_tours = identify_auto_overallocation(persons, households, all_tours)
 
