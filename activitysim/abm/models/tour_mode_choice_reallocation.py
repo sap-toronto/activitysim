@@ -170,6 +170,14 @@ def get_trip_mc_logsums_for_all_modes(tours, segment_column_name, model_settings
     return tours
 
 
+def find_overlap(tours, auto_ownership):
+    # Find which intervals have overlaps greater than the number of autos the household owns
+    overlap_mask = tours[[*range(1, 49)]].sum() > auto_ownership
+    overlap_intervals = tours[[*range(1, 49)]].loc[:, overlap_mask]
+
+    return overlap_intervals[overlap_intervals.any(axis=1)]
+
+
 def identify_auto_overallocation(persons, households, tours):
     """
 
@@ -190,8 +198,6 @@ def identify_auto_overallocation(persons, households, tours):
     households.loc[households.auto_ownership == 0, 'auto_sufficiency'] = 'nocar'
 
     # Isolate for SOV-based tours by driving aged persons in auto insufficient households.
-    # This includes fully joint tours where the model only outputs them under a "point person".
-    # We're treating the "point person" as the driver
     households_insuff = households[households.auto_sufficiency == 'insuff']
     person_drivers = persons[persons.is_driving_age]
     # TODO: Expand criteria to cover joint tours once a reallocation method can be developed for it
@@ -200,37 +206,32 @@ def identify_auto_overallocation(persons, households, tours):
         tours.person_id.isin(person_drivers.index) &
         (tours.tour_mode == 'DRIVEALONEFREE')]
 
-    # Isolate for per household count of driver who made SOV-based tours in auto insufficient households
+    # Get per household count of driver who made SOV-based tours in auto insufficient households
     unique_pers_sov_insuff = tours_sov_insuff[['household_id', 'person_id']].drop_duplicates()
 
     count_pers_sov_insuff = unique_pers_sov_insuff.groupby('household_id').person_id.count()
     count_pers_sov_insuff = count_pers_sov_insuff[count_pers_sov_insuff > 1]
-    count_pers_sov_insuff = pd.merge(count_pers_sov_insuff,
-                                     households[['auto_ownership']],
-                                     how='left',
-                                     left_on='household_id',
-                                     right_index=True)
-    count_pers_sov_insuff = count_pers_sov_insuff[
-        count_pers_sov_insuff.auto_ownership < count_pers_sov_insuff.person_id]
 
     # Isolate for tours from auto insufficient households with multiple drivers who made SOV-based tours
     tours_insuff_mult_sov = tours_sov_insuff[tours_sov_insuff.household_id.isin(count_pers_sov_insuff.index)]
     tours_insuff_mult_sov = tours_insuff_mult_sov.sort_values(['household_id', 'start', 'end'])
-    # shift household id for household check
-    tours_insuff_mult_sov['hh_id_shift'] = tours_insuff_mult_sov.household_id.shift(1)
-    # shift end time for overlap calculation
-    tours_insuff_mult_sov['end_shift'] = tours_insuff_mult_sov.end.shift(1)
-    # flag same household
-    tours_insuff_mult_sov['hh_check'] = tours_insuff_mult_sov.household_id == tours_insuff_mult_sov.hh_id_shift
-    # flag overlap based on tours time gap but conditional on the same household flag being true
-    tours_insuff_mult_sov['tours_time_gap'] = tours_insuff_mult_sov.start - tours_insuff_mult_sov.end_shift
-    tours_insuff_mult_sov['overlap'] = tours_insuff_mult_sov.tours_time_gap * tours_insuff_mult_sov.hh_check < 0
-    # Also tag the corresponding overlapping tour before
-    tours_insuff_mult_sov['overlap'] = tours_insuff_mult_sov.overlap + tours_insuff_mult_sov.overlap.shift(-1,
-                                                                                                           fill_value=0)
 
-    # Isolate for only overlapping tours
-    tours_overlapped = tours_insuff_mult_sov[tours_insuff_mult_sov.overlap > 0].copy()
+    # create time interval grid
+    tour_time_grid = pd.DataFrame({'household_id': tours_insuff_mult_sov['household_id']})
+    for i in range(1, 49):
+        tour_time_grid[i] = False
+        interval_flags = (tours_insuff_mult_sov['start'] <= i) & (tours_insuff_mult_sov['end'] >= i)
+        tour_time_grid.loc[interval_flags, i] = True
+
+    overlap_tour_ids = []
+    for name, group in tour_time_grid.groupby('household_id'):
+        # get the auto ownership of the household being evaluated
+        auto_ownership = households.loc[name, 'auto_ownership']
+        overlap_tours = find_overlap(group, auto_ownership)
+        overlap_tour_ids.extend(overlap_tours.index)
+
+    # Isolate for only households with the identified tour overlaps
+    tours_overlapped = tours_insuff_mult_sov.loc[overlap_tour_ids].copy()
 
     assert (tours_overlapped.tour_mode == 'DRIVEALONEFREE').all()
     assert tours_overlapped.groupby('household_id').size().min() > 1
