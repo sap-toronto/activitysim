@@ -258,12 +258,6 @@ def household_auto_reallocation(households, tours_overlapped, no_auto_tours):
     # Calculate loss of utility from losing auto use
     tours_overlapped['no_auto_logsum_loss'] = tours_overlapped.mode_choice_logsum - tours_overlapped.no_auto_mc_logsum
 
-    # Join in household vehicle numbers
-    tours_overlapped = tours_overlapped.merge(households[['auto_ownership']],
-                                              how='left',
-                                              left_on='household_id',
-                                              right_index=True)
-
     # Find the optimal allocation by sorting based on loss of tour mode choice utility and prioritizing tours where the
     # difference is the greatest.
     # The method is a little crude and inefficient in its allocation, but it works
@@ -273,8 +267,8 @@ def household_auto_reallocation(households, tours_overlapped, no_auto_tours):
         # Sort by utility loss in descending order
         group.sort_values(by='no_auto_logsum_loss', ascending=False, inplace=True)
         # flag bottom tours that exceeds number of vehicles in household for reallocation
-        num_of_veh = int(group['auto_ownership'].max())
-        group.iloc[num_of_veh:, -1] = 1
+        auto_ownership = households.loc[name, 'auto_ownership']
+        group.iloc[auto_ownership:, -1] = 1
         reallocated_groups.append(group)
     tours_realloc = pd.concat(reallocated_groups)
 
@@ -332,6 +326,8 @@ def tour_mode_choice_reallocation_simulate(
         how="left",
         suffixes=("", "_r"),
     )
+
+    overlapped_tours = identify_auto_overallocation(persons, households, primary_tours_merged)
 
     constants = {}
     # model_constants can appear in expressions
@@ -421,24 +417,24 @@ def tour_mode_choice_reallocation_simulate(
     # FIXME should normalize handling of tour_type and tour_purpose
     # mtctm1 school tour_type includes univ, which has different coefficients from elementary and HS
     # we should either add this column when tours created or add univ to tour_types
-    not_university = (primary_tours_merged.tour_type != "school") | ~(
-        primary_tours_merged.is_university.astype(bool)
-        if "is_university" in primary_tours_merged.columns
+    not_university = (overlapped_tours.tour_type != "school") | ~(
+        overlapped_tours.is_university.astype(bool)
+        if "is_university" in overlapped_tours.columns
         else False
     )
-    primary_tours_merged["tour_purpose"] = primary_tours_merged.tour_type.where(
+    overlapped_tours["tour_purpose"] = overlapped_tours.tour_type.where(
         not_university, "univ"
     )
 
     # if trip logsums are used, run trip mode choice and append the logsums
     if model_settings.get("COMPUTE_TRIP_MODE_CHOICE_LOGSUMS", False):
-        primary_tours_merged = get_trip_mc_logsums_for_all_modes(
-            primary_tours_merged, segment_column_name, model_settings, trace_label
+        overlapped_tours = get_trip_mc_logsums_for_all_modes(
+            overlapped_tours, segment_column_name, model_settings, trace_label
         )
 
     #
     choices_list = []
-    for tour_purpose, tours_segment in primary_tours_merged.groupby(
+    for tour_purpose, tours_segment in overlapped_tours.groupby(
             segment_column_name
     ):
 
@@ -530,9 +526,8 @@ def tour_mode_choice_reallocation_simulate(
     assign_in_place(primary_tours, choices_df)
 
     # update tours table with mode choice (and optionally logsums)
-    no_auto_tours = tours.to_frame()
     all_tours = tours.to_frame()
-    assign_in_place(no_auto_tours, choices_df)
+    tours_to_realloc = overlapped_tours[all_tours.columns].copy()
 
     if old_tour_mode_column_name is not None:
         all_tours[old_tour_mode_column_name] = all_tours.tour_mode
@@ -540,9 +535,7 @@ def tour_mode_choice_reallocation_simulate(
     if old_logsum_column_name is not None:
         all_tours[old_logsum_column_name] = all_tours.mode_choice_logsum
 
-    overlapped_tours = identify_auto_overallocation(persons, households, all_tours)
-
-    reallocated_tours = household_auto_reallocation(households, overlapped_tours, no_auto_tours)
+    reallocated_tours = household_auto_reallocation(households, tours_to_realloc, choices_df)
 
     assign_in_place(all_tours, reallocated_tours)
 
