@@ -27,6 +27,7 @@ from . import (
     stop_frequency,
     summarize,
     tour_mode_choice,
+    tour_mode_choice_reallocation,
     tour_od_choice,
     tour_scheduling_probabilistic,
     trip_departure_choice,
