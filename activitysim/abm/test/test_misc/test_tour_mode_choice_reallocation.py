@@ -77,13 +77,13 @@ def no_auto_tours(tours):
 def test_tour_identification(persons, households, tours):
     setup_dirs()
 
-    overlapped_tours = tmcr.identify_auto_overallocation(persons, households, tours)
+    overlapped_tours = tmcr.identify_auto_overallocations(persons, households, tours, 48)
 
     assert overlapped_tours.groupby('household_id').household_id.max().to_list() == [8, 9, 10]
 
 
 def test_auto_reallocation_flag(persons, households, tours, no_auto_tours):
-    overlapped_tours = tmcr.identify_auto_overallocation(persons, households, tours)
+    overlapped_tours = tmcr.identify_auto_overallocations(persons, households, tours, 48)
 
     reallocated_tours = tmcr.household_auto_reallocation(households, overlapped_tours, no_auto_tours)
 
@@ -95,7 +95,7 @@ def test_auto_reallocation_flag(persons, households, tours, no_auto_tours):
 
 
 def test_auto_reallocation(persons, households, tours, no_auto_tours):
-    overlapped_tours = tmcr.identify_auto_overallocation(persons, households, tours)
+    overlapped_tours = tmcr.identify_auto_overallocations(persons, households, tours, 48)
 
     reallocated_tours = tmcr.household_auto_reallocation(households, overlapped_tours, no_auto_tours)
 
