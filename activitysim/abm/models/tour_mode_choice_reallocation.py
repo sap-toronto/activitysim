@@ -220,7 +220,7 @@ def filter_for_multi_drive_tour_households(households, persons, tours):
     tours_insuff_drv = tours[
         tours.household_id.isin(households_insuff.index) &
         tours.person_id.isin(person_drivers.index) &
-        (tours.tour_mode == 'DRIVEALONEFREE')]
+        (tours.tour_mode.isin(['DRIVEALONEFREE', 'DRIVEALONEPAY']))]
 
     # Get per household count of driver who made SOV-based tours in auto insufficient households
     unique_pers_insuff_drv = tours_insuff_drv[['household_id', 'person_id']].drop_duplicates()
@@ -235,7 +235,7 @@ def filter_for_multi_drive_tour_households(households, persons, tours):
     return tours_insuff_mult_drv
 
 
-def create_time_grid(filtered_tours):
+def create_time_grid(filtered_tours, num_intervals):
     """
     Creates per tour time grid flagging the 30-min intervals each tour occupies
 
@@ -243,6 +243,8 @@ def create_time_grid(filtered_tours):
     ----------
     filtered_tours : pd.Dataframe
         Tours from auto insufficient households with multiple drivers who made SOV-based tours
+    num_intervals: int
+        Number of time intervals in a day
 
     Returns
     -------
@@ -251,7 +253,7 @@ def create_time_grid(filtered_tours):
 
     """
     tour_time_grid = pd.DataFrame({'household_id': filtered_tours['household_id']})
-    for i in range(1, 49):
+    for i in range(1, num_intervals+1):
         tour_time_grid[i] = False
         interval_mask = (filtered_tours['start'] <= i) & (filtered_tours['end'] >= i)
         tour_time_grid.loc[interval_mask, i] = True
@@ -259,7 +261,7 @@ def create_time_grid(filtered_tours):
     return tour_time_grid
 
 
-def find_auto_overallocations(tours, auto_ownership):
+def find_auto_overallocations(tours, auto_ownership, num_intervals):
     """
     Identifies overlapped auto_based tours that exceed the number of cars owned by the single household
 
@@ -268,6 +270,8 @@ def find_auto_overallocations(tours, auto_ownership):
     tours : pd.Dataframe
         Expecting auto-based tours from a single household
     auto_ownership : int
+    num_intervals: int
+        Number of time intervals in a day
 
     Returns
     -------
@@ -276,15 +280,15 @@ def find_auto_overallocations(tours, auto_ownership):
 
     """
     # Find which intervals have overlaps greater than the number of autos the household owns
-    overallocation_condition = tours[[*range(1, 49)]].sum() > auto_ownership
-    overallocated_intervals = tours[[*range(1, 49)]].loc[:, overallocation_condition]
+    overallocation_condition = tours[[*range(1, num_intervals+1)]].sum() > auto_ownership
+    overallocated_intervals = tours[[*range(1, num_intervals+1)]].loc[:, overallocation_condition]
 
     overallocated_tours = overallocated_intervals[overallocated_intervals.any(axis=1)]
 
     return overallocated_tours
 
 
-def identify_auto_overallocations(persons, households, tours):
+def identify_auto_overallocations(persons, households, tours, num_intervals):
     """
     Identifies all overallocated tours
 
@@ -293,6 +297,8 @@ def identify_auto_overallocations(persons, households, tours):
     persons : pd.Dataframe
     households : pd.Dataframe
     tours : pd.Dataframe
+    num_intervals: int
+        Number of time intervals in a day
 
     Returns
     -------
@@ -303,20 +309,20 @@ def identify_auto_overallocations(persons, households, tours):
     # Isolate for tours from auto insufficient households with multiple drivers who made SOV-based tours
     filtered_tours = filter_for_multi_drive_tour_households(households, persons, tours)
 
-    tour_time_grid = create_time_grid(filtered_tours)
+    tour_time_grid = create_time_grid(filtered_tours, num_intervals)
 
     overlap_tour_ids = []
     for name, group in tour_time_grid.groupby('household_id'):
         # get the auto ownership of the household being evaluated
         auto_ownership = households.loc[name, 'auto_ownership']
-        overlap_tours = find_auto_overallocations(group, auto_ownership)
+        overlap_tours = find_auto_overallocations(group, auto_ownership, num_intervals)
         overlap_tour_ids.extend(overlap_tours.index)
 
     # Isolate for only households with the identified tour overlaps
     tours_overallocated = filtered_tours.loc[overlap_tour_ids].copy()
 
     # Assert that only auto-based tours are tagged
-    assert (tours_overallocated.tour_mode == 'DRIVEALONEFREE').all()
+    assert (tours_overallocated.tour_mode.isin(['DRIVEALONEFREE', 'DRIVEALONEPAY'])).all()
     # Assert that all tagged households has been tagged with multiple tours
     assert tours_overallocated.groupby('household_id').size().min() > 1
 
@@ -364,17 +370,19 @@ def household_auto_reallocation(households, tours_to_realloc, no_auto_tours):
 
     # Allocate new alternative mode
     reallocated_tours.loc[reallocated_tours.reallocation_flag, 'tour_mode'] = reallocated_tours.no_auto_tour_mode
-    reallocated_tours.loc[reallocated_tours.reallocation_flag, 'mode_choice_logsum'] = reallocated_tours.no_auto_mc_logsum
+    reallocated_tours.loc[
+        reallocated_tours.reallocation_flag, 'mode_choice_logsum'] = reallocated_tours.no_auto_mc_logsum
 
     # Assert reallocated tours no longer uses auto-based modes
-    assert (reallocated_tours.loc[reallocated_tours.reallocation_flag, 'tour_mode'] != 'DRIVEALONEFREE').all()
+    assert (~reallocated_tours.loc[reallocated_tours.reallocation_flag, 'tour_mode'].isin(
+        ['DRIVEALONEFREE', 'DRIVEALONEPAY'])).all()
 
     return reallocated_tours[output_columns]
 
 
 @inject.step()
 def tour_mode_choice_reallocation_simulate(
-        households, persons, tours, persons_merged, network_los, chunk_size, trace_hh_id
+        households, persons, tours, persons_merged, network_los, tdd_alts, chunk_size, trace_hh_id
 ):
     """
     Tour mode choice auto reallocation simulate
@@ -418,7 +426,8 @@ def tour_mode_choice_reallocation_simulate(
         suffixes=("", "_r"),
     )
 
-    overallocated_tours = identify_auto_overallocations(persons, households, primary_tours_merged)
+    num_intervals = tdd_alts.start.max()
+    overallocated_tours = identify_auto_overallocations(persons, households, primary_tours_merged, num_intervals)
 
     constants = {}
     # model_constants can appear in expressions
